@@ -1,0 +1,253 @@
+package pack33
+
+import org.apache.spark.SparkConf
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.Row
+import org.apache.spark.sql.Column
+import org.apache.spark.sql.types._
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.expressions._
+import org.apache.spark.sql.expressions.Window
+import scala.io.Source
+
+object obj {
+
+  def main(args: Array[String]): Unit = {
+
+    println("======Started========")
+    val conf = new SparkConf().setAppName("first").setMaster("local[*]").set("spark.driver.host", "localhost")
+      .set("spark.driver.allowMultipleContexts", "true")
+    val sc = new SparkContext(conf)
+    sc.setLogLevel("error")
+    System.setProperty("hadoop.home.dir", "D:/zeyobron/bigdata sai/sparksoft/hadoop")
+    val spark = SparkSession.builder.getOrCreate()
+    import spark.implicits._
+
+    //	====================================================================================================================================================================================================================
+
+    println("======read files========")
+
+    val df = spark.read.format("csv").option("header", true).option("inferSchema", true).load("file:///D:/projects/GITHUB PROJECT/ipl data/data/deliveries.csv")
+    df.show()
+    df.printSchema()
+    println("unique match id in desc")
+
+    val deliveriesdf = df.select("match_id").distinct().orderBy($"match_id".desc)
+    deliveriesdf.show()
+    deliveriesdf.printSchema()
+
+    println("ipl final mach id = 1426312")
+    val ipl_final_df = df.filter(col("match_id") === 1426312)
+    ipl_final_df.show()
+    ipl_final_df.printSchema()
+
+    //	====================================================================================================================================================================================================================
+
+    println(" 1st innings data")
+
+    val first_innings_batting = ipl_final_df.filter($"inning" === 1)
+    first_innings_batting.show()
+
+    println(" 2nd innings data")
+
+    val second_innings_batting = ipl_final_df.filter($"inning" === 2)
+    second_innings_batting.show()
+
+    //	====================================================================================================================================================================================================================
+
+    println("scorecard 1st innnings")
+
+    //	====================================================================================================================================================================================================================
+
+    println("batting in 1st innings")
+
+    //    seperating first innings batting data
+
+    val scorecard_bat1_df = first_innings_batting.filter("extras_type is NULL")
+      .groupBy("batter")
+      .agg(
+        sum("batsman_runs").alias("runs"),
+        count("ball").alias("balls"),
+        count(when($"batsman_runs" === 4, 1)).alias("4s"),
+        count(when($"batsman_runs" === 6, 1)).alias("6s"),
+        round((sum("batsman_runs") * 100 / count("ball")), 2).alias("S/R"))
+    scorecard_bat1_df.show()
+
+    //    to find order in which the batsman entered
+
+    val batsman1_order = first_innings_batting.withColumn("over-ball", (concat(col("over"), lit("."), col("ball"))).cast(FloatType))
+      .groupBy("batter").agg(min("over-ball").alias("orderin")).orderBy("orderin")
+    batsman1_order.show()
+    //   window function:
+    val wd = Window.orderBy("orderin")
+    val batsman1_order_df = batsman1_order.withColumn("batting_order", rank().over(wd))
+      .withColumnRenamed("batter", "batter1")
+    batsman1_order_df.show()
+    //final batting score card of 1st innings
+    val bat1joindf = scorecard_bat1_df.join(batsman1_order_df, scorecard_bat1_df("batter") === batsman1_order_df("batter1"), "inner").orderBy("orderin")
+    bat1joindf.show()
+    val fin_bat1_df = bat1joindf.drop("batter1").drop("orderin")
+    fin_bat1_df.show()
+
+    //	====================================================================================================================================================================================================================
+
+    println("bowling in 1st innnigs")
+
+    //    seperating 1st innings bowling data
+    val scorecard_bowl_1_df = first_innings_batting.groupBy("bowler").agg(
+
+      sum("total_runs").alias("runs_conceded"),
+      sum(
+        when(
+          (col("extras_type") === "legbyes") ||
+            (col("extras_type") === "byes"), col("extra_runs"))).alias("not_by_bowler"),
+      count(
+        when(
+          (col("extras_type").isNull) ||
+            (col("extras_type") === "legbyes") ||
+            (col("extras_type") === "byes"), 1)).alias("balls"),
+      count(
+        when(
+          col("is_wicket") === 1, 1)).alias("W"))
+    scorecard_bowl_1_df.show()
+    //bowling stats column for 1st innings
+    val score_table_b1_df = scorecard_bowl_1_df.select(
+      col("bowler"),
+      concat(floor(col("balls") / 6), lit("."), col("balls") % 6).alias("O"),
+      (col("runs_conceded") - coalesce(col("not_by_bowler"), lit("0"))).alias("R"),
+      col("W"),
+      round((col("runs_conceded") / (col("balls") / 6)), 2).alias("Econ"))
+
+    score_table_b1_df.show()
+
+    //     maiden over column for 1st innings
+    println("maiden bowler in 1st innnigs")
+
+    val mb_1_df = first_innings_batting.groupBy("bowler", "over").agg(
+      sum("total_runs").alias("runs_conceded"),
+      count(col("over")).alias("balls"),
+      sum(
+        (
+          when(
+            (col("extras_type") === "legbyes") || (col("extras_type") === "byes"),
+            col("extra_runs")))).alias("not_by_bowler"))
+
+    mb_1_df.show()
+
+    val mb_1_df1 = mb_1_df.withColumn("runs_by_bowler", (
+      col("runs_conceded") - coalesce(col("not_by_bowler"), lit(0))))
+    mb_1_df1.show()
+
+    val maiden_bowler_1_df = mb_1_df1.select("*").filter((col("runs_by_bowler") === 0) && (col("balls") === 6))
+      .groupBy("bowler").agg(count("bowler").alias("M"))
+      .withColumnRenamed("bowler", "maiden_bowler")
+
+    maiden_bowler_1_df.show()
+    //joining maiden column to bowling stats in 1st innnings
+    println("bowl stats")
+    val bowljoindf = score_table_b1_df.join(maiden_bowler_1_df, score_table_b1_df("bowler") === maiden_bowler_1_df("maiden_bowler"), "left")
+    bowljoindf.show()
+    //final bowling stats colums for 1st innings
+    val fin_bowl_join_1 = bowljoindf.na.fill(0).drop("maiden_bowler")
+    fin_bowl_join_1.show()
+
+    //	====================================================================================================================================================================================================================
+
+    println("scorecard 2nd innings ")
+
+    //	====================================================================================================================================================================================================================
+
+    println("batting in 2nd innnigs")
+    //    seperating second innings batting data
+    val scorecard_bat2_df = second_innings_batting.filter("extras_type is NULL")
+      .groupBy("batter")
+      .agg(
+        sum("batsman_runs").alias("runs"),
+        count("ball").alias("balls"),
+        count(when($"batsman_runs" === 4, 1)).alias("4s"),
+        count(when($"batsman_runs" === 6, 1)).alias("6s"),
+        round((sum("batsman_runs") * 100 / count("ball")), 2).alias("S/R"))
+    scorecard_bat2_df.show()
+
+    //    to find order in which the batsman entered in 2nd innings
+    val batsman2_order = second_innings_batting.withColumn("over-ball", (concat(col("over"), lit("."), col("ball"))).cast(FloatType))
+      .groupBy("batter").agg(min("over-ball").alias("orderin")).orderBy("orderin")
+    batsman2_order.show()
+    println("window function")
+    //   window function:
+    val wd1 = Window.orderBy("orderin")
+    val batsman2_order_df = batsman2_order.withColumn("batting_order", rank().over(wd1))
+      .withColumnRenamed("batter", "batter2")
+    batsman2_order_df.show()
+    //final batting score card of 2nd innings
+    val bat2joindf = scorecard_bat2_df.join(batsman2_order_df, scorecard_bat2_df("batter") === batsman2_order_df("batter2"), "inner").orderBy("orderin")
+    bat2joindf.show()
+
+    val fin_bat2_df = bat2joindf.drop("batter2").drop("orderin")
+    fin_bat2_df.show()
+
+    //	====================================================================================================================================================================================================================
+
+    println("bowling in 2nd innnigs")
+    //    seperating 2nd innings bowling data
+    val scorecard_bowl_2_df = second_innings_batting.groupBy("bowler").agg(
+
+      sum("total_runs").alias("runs_conceded"),
+      sum(
+        when(
+          (col("extras_type") === "legbyes") ||
+            (col("extras_type") === "byes"), col("extra_runs"))).alias("not_by_bowler"),
+      count(
+        when(
+          (col("extras_type").isNull) ||
+            (col("extras_type") === "legbyes") ||
+            (col("extras_type") === "byes"), 1)).alias("balls"),
+      count(
+        when(
+          col("is_wicket") === 1, 1)).alias("W"))
+    scorecard_bowl_2_df.show()
+    //bowling stats column for2nd innings
+    val score_table_b2_df = scorecard_bowl_2_df.select(
+      col("bowler"),
+      concat(floor(col("balls") / 6), lit("."), col("balls") % 6).alias("O"),
+      (col("runs_conceded") - coalesce(col("not_by_bowler"), lit("0"))).alias("R"),
+      col("W"),
+      round((col("runs_conceded") / (col("balls") / 6)), 2).alias("Econ"))
+
+    score_table_b2_df.show()
+    //     maiden over column for 2nd innings
+    println("maiden bowler in 2nd innnigs")
+
+    val mb_2_df = second_innings_batting.groupBy("bowler", "over").agg(
+      sum("total_runs").alias("runs_conceded"),
+      count(col("over")).alias("balls"),
+      sum(
+        (
+          when(
+            (col("extras_type") === "legbyes") || (col("extras_type") === "byes"),
+            col("extra_runs")))).alias("not_by_bowler"))
+
+    mb_2_df.show()
+
+    val mb_2_df1 = mb_2_df.withColumn("runs_by_bowler", (
+      col("runs_conceded") - coalesce(col("not_by_bowler"), lit(0))))
+    mb_2_df1.show()
+
+    val maiden_bowler_2_df = mb_2_df1.select("*").filter((col("runs_by_bowler") === 0) && (col("balls") === 6))
+      .groupBy("bowler").agg(count("bowler").alias("M"))
+      .withColumnRenamed("bowler", "maiden_bowler")
+
+    maiden_bowler_2_df.show()
+    //joining maiden column to bowling stats in 2nd innnings
+    println("bowl stats")
+    val bowljoindf2 = score_table_b2_df.join(maiden_bowler_2_df, score_table_b2_df("bowler") === maiden_bowler_2_df("maiden_bowler"), "left")
+    bowljoindf2.show()
+    //final bowling stats colums for 2nd innings
+
+    val fin_bowl_join_2 = bowljoindf2.na.fill(0).drop("maiden_bowler")
+    fin_bowl_join_2.show()
+
+  }
+}
